@@ -1,0 +1,119 @@
+// 环境变量
+def IP1 = "xxx"
+def IP2 = "xxx"
+
+pipeline{
+    agent any
+
+    // 自动检测分支
+    parameters{
+       gitParameter branchFilter: 'origin/(.*)', defaultValue: 'release', name: 'branch', type: 'PT_BRANCH',useRepository: "$git"
+       choice(name: 'envProfile',choices: ['dev','test','uat','prod'],description: 'Environment Type')
+    }
+
+    // Skip Declarative: Checkout SCM stage
+    options {
+        skipDefaultCheckout true
+    }
+
+    // 判断是否nodejs为12版本
+    tools {
+        nodejs params.nodeVersion ?: 'nodejs-12.22.0'
+    }
+
+    stages{
+        stage("print variables"){
+            steps{
+                sh """
+                  echo refVar: $branch
+                  echo profile: $envProfile
+                  """
+            }
+        }
+
+        stage("checkout scm"){
+           steps{
+               checkout([
+                   $class: "GitSCM",
+                   branches: [[name: "$branch"]],
+                   // credentialsId:jenkins的凭据ID
+                   userRemoteConfigs: [[url: "$git", credentialsId: "xxx"]]])
+           }
+        }
+
+        stage('npm install') {
+          when {
+               expression { params.status != 'rollback' }
+          }
+          steps {              
+            sh """
+              node --version
+              npm config set registry http://xxx:4873/
+              npm i yarn -g
+              yarn config set registry http://xxx:4873/
+              yarn install --verbose
+              node node_main.js
+              """
+          }
+        }
+
+        stage('npm build') {
+          when {
+               expression { params.status != 'rollback' }
+          }
+          steps {
+            sh """
+              npm run build:${envProfile}
+              """
+          }
+        }
+
+        stage('deploy') {
+            when {
+                expression { envProfile ==~ /prod/ }
+            }
+            steps {
+                script {
+                    if (params.status == 'rollback') {
+                        // 回滚逻辑
+                        sh """
+                            scp -r /var/jenkins_home/pipline_shell/nginx-pica_rollback.sh root@$IP1:/data/
+                            ssh root@$IP1 "bash /data/nginx-pica_rollback.sh $JOB_NAME && rm -f /data/nginx-pica_rollback.sh"
+
+                            scp -r /var/jenkins_home/pipline_shell/nginx-pica_rollback.sh root@$IP2:/data/
+                            ssh root@$IP2 "bash /data/nginx-pica_rollback.sh $JOB_NAME && rm -f /data/nginx-pica_rollback.sh"
+
+                            echo "Rollback successful ！！！！"
+                        """
+                    } else {
+                        // 非回滚逻辑
+                        sh """
+                            ssh root@$IP1 "rm -rf /usr/share/nginx/html/$JOB_NAME/*"
+                            scp -r $WORKSPACE/dist/* root@$IP1:/usr/share/nginx/html/$JOB_NAME
+                            scp -r /var/jenkins_home/pipline_shell/nginx-pica_backup.sh root@$IP1:/data/
+                            ssh root@$IP1 "bash /data/nginx-pica_backup.sh $JOB_NAME && rm -f /data/nginx-pica_backup.sh"
+
+                            ssh  root@$IP2 "rm -rf /usr/share/nginx/html/$JOB_NAME/*"
+                            scp -r $WORKSPACE/dist/* root@$IP2:/usr/share/nginx/html/$JOB_NAME
+                            scp -r /var/jenkins_home/pipline_shell/nginx-pica_backup.sh root@$IP2:/data/
+                            ssh root@$IP2 "bash /data/nginx-pica_backup.sh $JOB_NAME && rm -f /data/nginx-pica_backup.sh"
+
+                            echo "devops successful ！！！！"
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                // 无论构建成功与否都不会影响整体结果
+                catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                    sh '/var/jenkins_home/pipline_shell/dingding_jenkins --name="${JOB_NAME}" --id="${BUILD_ID}" --url="$JOB_URL" --branch="$refVar"'
+                }
+            }
+        }
+    }
+}

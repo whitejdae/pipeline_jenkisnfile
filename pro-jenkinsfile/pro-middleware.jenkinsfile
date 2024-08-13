@@ -1,0 +1,59 @@
+#!groovy
+String branch = "${env.branch}"
+pipeline {
+    agent any
+
+    options {
+        timeout(time: 1, unit: 'HOURS')
+    }
+
+    tools {
+        maven 'maven-3.5.2'
+        jdk 'jdk-1.8'
+    }
+
+    stages {
+        stage("Git"){
+            steps{
+                timeout(time:5, unit:"MINUTES"){
+                    // 添加jenkins设置的凭据ID
+                    git branch: '$branch', credentialsId: 'xxx', url: '$git'
+                }
+            }
+        }
+        stage("Build"){
+            steps{
+                timeout(time:5, unit:"MINUTES"){
+                   sh "java -version"
+                   sh "mvn -version"
+                   sh "mvn package -f pom.xml clean -U install -Dmaven.test.skip=true -X"
+                }
+            }
+
+        }
+         stage("Deploy"){
+            steps{
+              sh label: '', script: '''
+                IP1="xxx"
+                IP2="xxx"
+                JARNAME=`echo $JOB_NAME | awk -F'[_]' '{print $2}'`
+                scp $WORKSPACE/target/$JARNAME".jar" root@$IP1:/opt/$JARNAME
+                scp $WORKSPACE/target/$JARNAME".jar" root@$IP2:/opt/$JARNAME
+                
+                ssh root@$IP1 "supervisorctl restart $JARNAME"
+                ssh root@$IP2 "supervisorctl restart $JARNAME"
+              '''
+            }
+        }
+    }
+
+    post {
+        always {
+            // 无论构建成功与否都不会影响整体结果
+            catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                sh '/var/jenkins_home/pipline_shell/dingding_jenkins --name="${JOB_NAME}" --id="${BUILD_ID}" --url="$JOB_URL" --branch="$branch"'
+            }
+        }
+    }
+
+}

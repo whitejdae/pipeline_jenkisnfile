@@ -1,0 +1,87 @@
+#!groovy
+String branch = "${env.branch}"
+pipeline {
+    agent any
+
+    // 自动检测分支
+    parameters{
+       gitParameter branchFilter: 'origin/(.*)', defaultValue: 'release', name: 'branch', type: 'PT_BRANCH',useRepository: "$git"
+    }
+
+    options {
+        timeout(time: 1, unit: 'HOURS')
+    }
+
+    tools {
+        maven 'maven-3.5.2'
+        jdk 'jdk-1.8'
+    }
+
+    stages {
+        stage("git checkout"){
+           steps{
+               checkout([
+                   $class: "GitSCM",
+                   branches: [[name: "$branch"]],
+                   userRemoteConfigs: [[url: "$git", credentialsId: "xxx"]]])
+           }
+        }
+        stage("Build"){
+            steps{
+                timeout(time:5, unit:"MINUTES"){
+                   sh "java -version"
+                   sh "mvn -version"
+                   sh "mvn clean -U install  -Dmaven.test.skip=true -X"
+                }
+            }
+
+        }
+         stage("Deploy"){
+            steps{
+              sh label: '', script: '''
+              TIME=`date "+%Y%m%d%H%M"`
+              PROJECT=`echo $JOB_NAME | awk -F[\'_\'] \'{ print $1 }\'`
+              JARNAME=`echo $JOB_NAME | awk -F[\'_\'] \'{ print $2 }\'`
+
+              if [ "$status" = "devops" ];then
+                  echo "FROM openjdk:8" > /var/jenkins_home/dockerfile/$PROJECT/$JARNAME
+                  echo "RUN mkdir -p /app" >> /var/jenkins_home/dockerfile/$PROJECT/$JARNAME
+                  ...
+                  echo 'ENTRYPOINT ["java","-jar","'${JARNAME}.jar'"]'  >>  /var/jenkins_home/dockerfile/$PROJECT/$JARNAME
+                  echo  'CMD ["--spring.profiles.active=prod"]'  >>  /var/jenkins_home/dockerfile/$PROJECT/$JARNAME
+                  echo "创建dockerfile成功！！！"
+
+                  cat /var/jenkins_home/dockerfile/registry_password |  docker login -u xxx --password-stdin xxx.com
+                  docker build -t xxx.com/$PROJECT/$JARNAME:$TIME -f /var/jenkins_home/dockerfile/$PROJECT/$JARNAME $WORKSPACE/server/target/.
+                  docker push xxx.com/$PROJECT/$JARNAME:$TIME
+                  docker rmi xxx.com/$PROJECT/$JARNAME:$TIME
+                  echo "镜像构建成功！！！"
+
+                  echo "--------------------------------更新服务中--------------------------------"
+                  bash /tmp/check-cloud.sh $PROJECT $JARNAME $TIME
+                  kubectl set image deployment/$JARNAME $JARNAME=xxx.com/$PROJECT/$JARNAME:$TIME -n $PROJECT
+                  sleep 30
+              else
+                  echo "--------------------------------回滚服务中--------------------------------"
+                  kubectl rollout undo deployment/$JARNAME -n $PROJECT
+                  sleep 30
+              fi
+
+              echo "正在查询服务是否更新完成，请稍等！！！"
+              bash /var/jenkins_home/pipline_shell/pro_project_update-check.sh $PROJECT $JARNAME
+              '''
+            }
+        }
+    }
+
+    post {
+        always {
+            // 无论构建成功与否都不会影响整体结果
+            catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                // 无论构建成功与否都执行的脚本
+                sh '/var/jenkins_home/pipline_shell/dingding_jenkins --name="${JOB_NAME}" --id="${BUILD_ID}" --url="$JOB_URL" --branch="$branch"'
+            }
+        }
+    }
+
+}
